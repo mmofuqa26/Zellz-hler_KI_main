@@ -1,0 +1,65 @@
+{
+  "original_count": 13,
+  "corrected_count": 15,
+  "delta": 2,
+  "image_path": "tests/data/synthetic_clean_cluster.png",
+  "timestamp": "2026-08-31T23:23:17.092868",
+  "markers": [
+    {
+      "cell_id": 1,
+      "x_px": 200.0,
+      "y_px": 100.0,
+      "area_px": 888.0,
+      "confidence": 0.95,
+      "status": "DEAD"
+    },
+    {
+      "cell_id": 2,
+      "x_px": 100.0,
+      "y_px": 100.0,
+      "area_px": 440.0,
+      "confidence": 0.923,
+      "status": "LIVE"
+    },
+    {
+      "cell_id": 3,
+      "x_px": 450.0,
+      "y_px": 120.0,
+      "area_px": 884.0,
+      "confidence": 0.948,
+      "status": "LIVE"
+    },
+    {
+      "cell_id": 4,
+      "x_px": 600.0,
+      "y_px": 130.0,
+      "area_px": 516.0,
+      "confidence": 0.952,
+      "status": "DEAD"
+    },
+    {
+      "cell_id": 5,
+      "x_px": 300.0,
+      "y_px": 150.0,
+      "area_px": 516.0,
+      "confidence": 0.952,
+      "status": "LIVE"
+    },
+    {
+      "cell_id": 6,
+      "x_px": 212.89,
+      "y_px": 310.5,
+      "area_px": 2137.0,
+      "confidence": 0.658,
+      "status": "DEAD"
+    },
+    {
+      "cell_id": 7,
+      "x_px": 461.09,
+      "y_px": 415.57,
+      "area_px": 3571.5,
+      "confidence": 0.664,
+      "status": "DEAD"
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 """Hauptseite für CellCounter Pro (Streamlit Web-UI).
 
-Führt Bildanalyse, Watershed-Segmentierung, Viabilitätsbestimmung,
+Führt Bildanalyse, automatische Parameter-Kalibrierung, Watershed-Segmentierung,
+Viabilitätsbestimmung, Konfidenz-Ampel, manuelle Zählkorrektur,
 Sample-Galerie ("Probezellbilder"), Plotly-Grafiken und Datenexport zusammen.
 """
 
@@ -15,6 +16,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from src.core.calibration import auto_calibrate_parameters
 from src.core.metrics import compute_summary_statistics
 from src.core.preprocessing import (
     apply_clahe,
@@ -36,14 +38,19 @@ from src.utils.database import (
     get_analysis_history,
     save_analysis_result,
 )
-from src.utils.io_export import create_annotated_overlay, generate_csv_data
+from src.utils.io_export import (
+    create_annotated_overlay,
+    generate_csv_data,
+    save_manual_correction,
+)
 from src.utils.logger import get_logger
 from tests.generate_test_images import create_all_test_images
 
 logger = get_logger("streamlit_app")
 
 
-def main():
+def main() -> None:
+    """Hauptfunktion für den Start der CellCounter Pro Streamlit Web-Applikation."""
     st.set_page_config(
         page_title="CellCounter Pro - Bioinformatik Zellzählung",
         page_icon="🔬",
@@ -54,17 +61,24 @@ def main():
     # 1. Konfiguration laden & Testbilder erzeugen (Probezellbilder)
     try:
         config = load_config("config.yaml")
-        sample_files = create_all_test_images("tests/data")
+        create_all_test_images("tests/data")
     except Exception as err:
         st.error(f"Fehler beim Laden der Konfiguration/Testdaten: {err}")
+        logger.exception("Fehler beim Initialisieren der Konfiguration oder Testdaten")
         return
 
     # 2. Sidebar rendern
-    seg_params, viab_params, active_preset = render_sidebar(config)
+    calibrated_state = st.session_state.get("calibrated_params", None)
+    seg_params, viab_params, active_preset, auto_calibrate = render_sidebar(
+        config, calibrated_params=calibrated_state
+    )
 
     # Header
     st.title("🔬 CellCounter Pro — Automated Microscopy Cell Counter")
-    st.caption(f"Aktives Labor-Preset: **{active_preset}** | Modus: **Offline (Enhanced Peak Watershed Engine)**")
+    st.caption(
+        f"Aktives Labor-Preset: **{active_preset}** | Modus: **Offline (Enhanced Peak Watershed Engine)** | "
+        f"Auto-Kalibrierung: **{'Aktiviert ✨' if auto_calibrate else 'Deaktiviert'}**"
+    )
 
     # Tabs
     tab_analysis, tab_history, tab_support = st.tabs(
@@ -82,6 +96,7 @@ def main():
 
         file_bytes = None
         filename = "image"
+        image_path_ref = ""
 
         if input_source_mode == "📁 Probezellbild aus Galerie wählen":
             sample_options = {
@@ -96,6 +111,7 @@ def main():
             )
             sample_path = sample_options[selected_sample_key]
             filename = os.path.basename(sample_path)
+            image_path_ref = sample_path
 
             if os.path.exists(sample_path):
                 with open(sample_path, "rb") as f:
@@ -112,6 +128,7 @@ def main():
             if uploaded_file is not None:
                 file_bytes = uploaded_file.read()
                 filename = uploaded_file.name
+                image_path_ref = uploaded_file.name
 
         # Analyse ausführen, wenn ein Bild geladen ist
         if file_bytes is not None:
@@ -129,24 +146,37 @@ def main():
                         gray_orig, max_dimension=seg_params.get("max_dimension", 2048)
                     )
 
-                    # d) Preprocessing (CLAHE + Entrauschung)
-                    clahe = apply_clahe(gray_work)
+                    # d) Automatische Parameter-Kalibrierung (R1)
+                    if auto_calibrate:
+                        calibrated_params, img_stats = auto_calibrate_parameters(
+                            gray_work, base_params=seg_params
+                        )
+                        st.session_state["calibrated_params"] = calibrated_params
+                        st.session_state["image_stats"] = img_stats
+                        effective_seg_params = calibrated_params
+                    else:
+                        effective_seg_params = seg_params
+                        img_stats = None
+
+                    # e) Preprocessing (CLAHE + Entrauschung)
+                    clahe_clip = effective_seg_params.get("clahe_clip_limit", 2.0)
+                    clahe = apply_clahe(gray_work, clip_limit=clahe_clip)
                     denoised = denoise_image(clahe)
 
-                    # e) Enhanced Peak Watershed Segmentierung
+                    # f) Enhanced Peak Watershed Segmentierung (mit Konfidenzbewertung)
                     cell_list, markers, binary = segment_cells(
-                        denoised, seg_params, scale_factor=scale_factor, um_per_pixel=um_per_px
+                        denoised, effective_seg_params, scale_factor=scale_factor, um_per_pixel=um_per_px
                     )
 
-                    # f) Lebend/Tot Viabilität
+                    # g) Lebend/Tot Viabilität
                     cell_list, viab_summary = classify_viability(
                         denoised, cell_list, viab_params
                     )
 
-                    # g) Gesamte Metriken
+                    # h) Gesamte Metriken (inkl. Ampel-Zusammenfassung)
                     summary = compute_summary_statistics(cell_list, viab_summary)
 
-                    # h) High-Res Overlay zeichnen
+                    # i) High-Res Overlay mit Ampelfarben zeichnen (Grün/Gelb/Rot)
                     annotated_img = create_annotated_overlay(
                         img_raw, cell_list, show_labels=True, show_contours=True
                     )
@@ -158,14 +188,37 @@ def main():
 
             st.success(f"Analyse von '{filename}' erfolgreich abgeschlossen!")
 
-            # Metric-Cards
+            # Kalibrierungs-Info Box
+            if auto_calibrate and img_stats is not None:
+                with st.expander("✨ Details der automatischen Parameter-Kalibrierung", expanded=False):
+                    col_k1, col_k2, col_k3 = st.columns(3)
+                    with col_k1:
+                        st.write(f"**CLAHE Clip-Limit:** `{effective_seg_params.get('clahe_clip_limit')}`")
+                        st.write(f"**Adaptive Blockgröße:** `{effective_seg_params.get('adaptive_thresh_block_size')}`")
+                    with col_k2:
+                        st.write(f"**Adaptive C-Konstante:** `{effective_seg_params.get('adaptive_thresh_c')}`")
+                        st.write(f"**Min. Markerfläche:** `{effective_seg_params.get('min_marker_area_px')} px`")
+                    with col_k3:
+                        st.write(f"**Distanz-Ratio:** `{effective_seg_params.get('dist_threshold_ratio')}`")
+                        st.write(f"**Laplace-Varianz:** `{img_stats.get('laplacian_var')}`")
+
+            # 4 Metric-Cards (R2: Gesamtzahl, Viabilität, Unsichere Zellen, Problematische Regionen)
             col_m1, col_m2, col_m3, col_m4 = st.columns(4)
             col_m1.metric("Gesamtzahl Zellen", summary["total_cells"])
-            col_m2.metric("Lebende Zellen", summary["live_cells"], delta=f"{summary['viability_pct']}% Viabilität")
-            col_m3.metric("Tote Zellen", summary["dead_cells"])
+            col_m2.metric(
+                "Lebende Zellen",
+                summary["live_cells"],
+                delta=f"{summary['viability_pct']}% Viabilität",
+            )
+            col_m3.metric(
+                "Unsichere Zellen",
+                summary["uncertain_cells"],
+                help="Zellen mit mittlerer Konfidenz (0.40 <= Score < 0.70, gelbe Markierung)",
+            )
             col_m4.metric(
-                "Ø Zellfläche",
-                f"{summary['mean_area_um2']} µm²" if summary["mean_area_um2"] else f"{summary['mean_area_px']} px²",
+                "Problematische Regionen",
+                summary["problematic_cells"],
+                help="Zellen mit niedriger Konfidenz (Score < 0.40, rote Markierung / Artefaktverdacht)",
             )
 
             st.markdown("---")
@@ -175,13 +228,69 @@ def main():
             col_img1, col_img2 = st.columns(2)
 
             with col_img1:
-                st.image(img_raw, caption=f"Originalbild: {filename} ({img_raw.shape[1]}x{img_raw.shape[0]} px)")
+                st.image(
+                    img_raw,
+                    caption=f"Originalbild: {filename} ({img_raw.shape[1]}x{img_raw.shape[0]} px)",
+                    use_container_width=True,
+                )
 
             with col_img2:
                 st.image(
                     annotated_img,
-                    caption="Annotiertes Segmentierungsergebnis (Grün = Lebend, Rot = Tot)",
+                    caption="Konfidenz-Ampel Overlay (Grün = Sicher >= 0.70, Gelb = Unsicher, Rot = Problematisch < 0.40)",
+                    use_container_width=True,
                 )
+
+            st.markdown("---")
+
+            # R3: Manuelle Korrektur-UI direkt unterhalb des Dual-Panels
+            st.subheader("✏️ Manuelle Zählkorrektur")
+            st.caption(
+                "Erlaube manuelle Anpassung der Gesamtzellzahl bei schwierigen oder atypischen Bildbereichen. "
+                "Die Korrektur wird mit allen Zellmarkern und Delta in data/corrections/ als JSON gespeichert."
+            )
+
+            col_corr1, col_corr2, col_corr3 = st.columns([2, 1, 2])
+            with col_corr1:
+                corrected_count = st.number_input(
+                    "Korrigierte Gesamtzahl",
+                    min_value=0,
+                    max_value=100000,
+                    value=int(summary["total_cells"]),
+                    step=1,
+                    key=f"corr_count_{filename}",
+                    help="Passen Sie die Gesamtzellzahl bei Bedarf manuell an.",
+                )
+
+            orig_count = int(summary["total_cells"])
+            delta_val = int(corrected_count - orig_count)
+
+            with col_corr2:
+                delta_str = f"+{delta_val}" if delta_val > 0 else f"{delta_val}"
+                st.metric(
+                    "Korrektur-Delta (Δ)",
+                    f"{delta_str} Zellen",
+                    delta=delta_val if delta_val != 0 else None,
+                    delta_color="normal" if delta_val == 0 else ("inverse" if delta_val < 0 else "normal"),
+                )
+
+            with col_corr3:
+                st.write("")
+                st.write("")
+                if st.button("💾 Korrektur speichern", key=f"btn_save_corr_{filename}"):
+                    try:
+                        saved_json_path = save_manual_correction(
+                            filename=filename,
+                            original_count=orig_count,
+                            corrected_count=corrected_count,
+                            cell_list=cell_list,
+                            image_path=image_path_ref,
+                            output_dir="data/corrections",
+                        )
+                        st.success(f"✅ Korrektur erfolgreich gespeichert in: `{saved_json_path}`")
+                    except Exception as corr_err:
+                        st.error(f"Fehler beim Speichern der Korrektur: {corr_err}")
+                        logger.exception("Fehler beim Speichern der manuellen Korrektur")
 
             st.markdown("---")
 
@@ -241,6 +350,7 @@ def main():
                         st.success(f"Erfolgreich als Analyse #{analysis_id} in SQLite gespeichert!")
                     except Exception as db_err:
                         st.error(f"Fehler beim Speichern in SQLite: {db_err}")
+                        logger.exception("Fehler beim Speichern in SQLite")
 
         else:
             st.info("👆 Bitte wähle ein Probezellbild oder lade ein Mikroskopiebild hoch.")
@@ -259,6 +369,7 @@ def main():
                 st.info("Noch keine gespeicherten Analysen in der Datenbank vorhanden.")
         except Exception as h_err:
             st.error(f"Fehler beim Abrufen der Historie: {h_err}")
+            logger.exception("Fehler beim Abrufen der SQLite-Historie")
 
     # TAB 3: SUPPORT & LOGS
     with tab_support:

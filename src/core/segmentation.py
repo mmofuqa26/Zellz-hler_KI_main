@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Tuple
 import cv2
 import numpy as np
 
+from src.core.confidence import compute_cell_confidence
 from src.utils.logger import get_logger
 
 logger = get_logger("segmentation")
@@ -243,6 +244,10 @@ def segment_cells(
             "contour_work": cnt,
             "mask_work": cell_mask,
         }
+
+        # Multi-Faktor-Konfidenzbewertung durchführen
+        conf_weights = params.get("confidence_weights", (0.35, 0.35, 0.30))
+        compute_cell_confidence(cell_data, gray, weights=conf_weights)
 
         cell_list.append(cell_data)
         cell_counter += 1
